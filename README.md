@@ -99,6 +99,10 @@ Third place will get:
 - One Tideways Elephpant
 - One-year JetBrains all-products pack license
 
+#### Where can I see the results?
+
+The benchmark results of each run are stored in [leaderboard.csv](./leaderboard.csv). 
+
 #### What kind of server is used for the benchmark?
 
 The benchmark runs on a Premium Intel Digital Ocean Droplet with 1vCPU and 2GB of memory. We deliberately chose not to use a more powerful server because we like to test in a somewhat "standard" environment for PHP.
