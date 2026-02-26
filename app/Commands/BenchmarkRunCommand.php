@@ -7,6 +7,7 @@ use Tempest\Console\ConsoleCommand;
 use Tempest\Console\HasConsole;
 use Tempest\DateTime\Duration;
 use Tempest\HttpClient\HttpClient;
+use Throwable;
 use function Tempest\env;
 
 final class BenchmarkRunCommand
@@ -16,6 +17,7 @@ final class BenchmarkRunCommand
     private const string CACHE_KEY = 'prs';
 
     private ?string $token;
+    private bool $verify = true;
     private bool $persist = false;
 
     public function __construct(
@@ -32,6 +34,7 @@ final class BenchmarkRunCommand
         bool $daemon = false,
         bool $persist = false,
         bool $cache = false,
+        bool $verify = true,
     ): void
     {
         if (! $this->token) {
@@ -40,6 +43,7 @@ final class BenchmarkRunCommand
         }
 
         $this->persist = $persist;
+        $this->verify = $verify;
 
         if ($cache === false) {
             $this->cache->remove(self::CACHE_KEY);
@@ -53,7 +57,12 @@ final class BenchmarkRunCommand
                     $this->cache->remove(self::CACHE_KEY);
                 }
 
-                $this->run($pr);
+                try {
+                    $this->run($pr);
+                } catch (Throwable $e) {
+                    $this->error($e->getMessage());
+                }
+
                 $this->warning('Sleeping for 10 seconds…');
                 sleep(10);
             }
@@ -142,7 +151,7 @@ final class BenchmarkRunCommand
                 }
             }
 
-            if (! $hasVerifiedLabel) {
+            if ($this->verify && ! $hasVerifiedLabel) {
                 continue;
             }
 
@@ -216,7 +225,6 @@ final class BenchmarkRunCommand
     private function processPR(array $pr): ?float
     {
         $prNumber = $pr['number'];
-        $commitSha = $pr['head']['sha'];
         $cloneUrl = $pr['head']['repo']['clone_url'] ?? null;
         $branch = $pr['head']['ref'];
 
@@ -260,7 +268,6 @@ final class BenchmarkRunCommand
 
         $command = sprintf(
             "hyperfine --warmup 0 --runs 1 --export-json %s 'cd %s && %s'",
-//            "hyperfine --warmup 2 --runs 5 --export-json %s 'cd %s && %s'",
             escapeshellarg($resultFile),
             escapeshellarg($benchmarkDir),
             $parseCommand,
@@ -286,6 +293,30 @@ final class BenchmarkRunCommand
             return null;
         }
 
+        if ($meanTime < 30) {
+            // Second run for fast PRs
+            $command = sprintf(
+                "hyperfine --warmup 2 --runs 5 --export-json %s 'cd %s && %s'",
+                escapeshellarg($resultFile),
+                escapeshellarg($benchmarkDir),
+                $parseCommand,
+            );
+
+            $this->prLine($prNumber, $command);
+
+            exec($command, $output, $returnCode);
+
+            if ($returnCode !== 0 || ! file_exists($resultFile)) {
+                $this->prError($prNumber, "Failed to run benchmark");
+                $this->githubComment($prNumber, 'Benchmarking failed');
+                return null;
+            }
+
+            // Parse results
+            $results = json_decode(file_get_contents($resultFile), true);
+            $meanTime = $results['results'][0]['mean'] ?? null;
+        }
+
         // Verify results
         $expectedPath = __DIR__ . '/../../data/real-data-expected.json';
 
@@ -306,31 +337,6 @@ final class BenchmarkRunCommand
         exec("rm -rf " . escapeshellarg($benchmarkDir));
 
         return $meanTime;
-    }
-
-    private function prLine(int $prNumber, string $message): void
-    {
-        $this->writeln("<style=\"fg-blue\">[#$prNumber]</style> $message");
-    }
-
-    private function prInfo(int $prNumber, string $message): void
-    {
-        $this->writeln("<style=\"bold fg-blue\">[#$prNumber] $message</style>");
-    }
-
-    private function prSuccess(int $prNumber, string $message): void
-    {
-        $this->writeln("<style=\"bold fg-green\">[#$prNumber] $message</style>");
-    }
-
-    private function prError(int $prNumber, string $message): void
-    {
-        $this->writeln("<style=\"bold fg-red\">[#$prNumber] $message</style>");
-    }
-
-    private function prWarning(int $prNumber, string $message): void
-    {
-        $this->writeln("<style=\"bold fg-yellow\">[#$prNumber] $message</style>");
     }
 
     private function addLeaderboardResult(int $prNumber, string $branch, ?float $newTime): void
@@ -378,7 +384,21 @@ final class BenchmarkRunCommand
                 $messages = [
                     "You've improved your result! Have a cookie: 🍪",
                     "You've improved your result! Nice!",
+                    "Can you make it even faster?? 🏎️💨",
+                    "Benchmark says: yes. CPU says: please stop. 😅",
+                    "Milliseconds were harmed in the making of this improvement. ⏱️",
+                    "That’s a nice drop in mean time. Keep going—there’s still juice left. 🧃",
                     "Yes, this is an automated message to tell you you've improved your result. Have a star: ⭐️",
+                    "I think there's room for _one_ more improvement… 👀",
+                    "That's a mean time you've got there. 🥁",
+                    "Mean time? More like *meme* time. You're cooking. 🍳",
+                    "You shaved off time so clean it should be in a barbershop. 💈",
+                    "Leaderboard be like _cheff's kiss_ 🤌",
+                    "Mean time goes down, confidence goes up",
+                    "Local maximum? Never heard of her. 📉",
+                    "You just made the CPU do less cardio. 🫀",
+                    "Mean time decreased. We love a humble average. 🙇",
+                    "You didn’t optimize. You *performed violence* (on latency). 🔪",
                 ];
 
                 $this->githubComment($prNumber, $messages[array_rand($messages)]);
@@ -437,5 +457,30 @@ final class BenchmarkRunCommand
         }
 
         $this->prSuccess($prNumber, "Leaderboard updated!");
+    }
+
+    private function prLine(int $prNumber, string $message): void
+    {
+        $this->writeln("<style=\"fg-blue\">[#$prNumber]</style> $message");
+    }
+
+    private function prInfo(int $prNumber, string $message): void
+    {
+        $this->writeln("<style=\"bold fg-blue\">[#$prNumber] $message</style>");
+    }
+
+    private function prSuccess(int $prNumber, string $message): void
+    {
+        $this->writeln("<style=\"bold fg-green\">[#$prNumber] $message</style>");
+    }
+
+    private function prError(int $prNumber, string $message): void
+    {
+        $this->writeln("<style=\"bold fg-red\">[#$prNumber] $message</style>");
+    }
+
+    private function prWarning(int $prNumber, string $message): void
+    {
+        $this->writeln("<style=\"bold fg-yellow\">[#$prNumber] $message</style>");
     }
 }
