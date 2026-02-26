@@ -135,7 +135,7 @@ final class Parser
         $dates = array_keys($res[$link]);
 
         echo "{\n";
-        echo '    "\/blog\/' . $link . '": {' . "\n";
+        echo '    "\/blog\/' . str_replace('/', '\/', $link) . '": {' . "\n";
         $j = 0;
         $jl = count($dates);
         while ($j < $jl) {
@@ -165,7 +165,7 @@ final class Parser
 
         for ($i = 1, $ll = count($links); $i < $ll; $i++) {
             $link = $links[$i];
-            echo ",\n" . '    "\/blog\/' . $link . '": {' . "\n";
+            echo ",\n" . '    "\/blog\/' . str_replace('/', '\/', $link) . '": {' . "\n";
             $j = 0;
             while ($j < $jl) {
                 $date = $dates[$j];
