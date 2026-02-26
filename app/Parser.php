@@ -8,64 +8,23 @@ final class Parser
 
     private const int OUTPUT_BUFFER = 256 * 1024;
 
-    private const int WORKERS = 4;
+    private const int ADDITIONAL_READ_BYTES = 200;
 
-    private function packLinks(array $result): string
+    private const int URL_FIXED_LENGTH = 25;
+
+    private const int DATE_LENGTH = 10;
+
+    private const int COMMA_TO_NEWLINE_OFFSET = 27;
+
+    private const int WORKERS = 8;
+
+    private function worker(string $filepath, string $inputPath, int $start, int $end): void
     {
-        $binary = pack('N', count($result));
-        foreach ($result as $link => $dates) {
-            $linkLen = strlen($link);
-            $binary .= pack('n', $linkLen) . $link;
-            $binary .= pack('N', count($dates));
-            foreach ($dates as $date => $cnt) {
-                $dateLen = strlen($date);
-                $binary .= pack('n', $dateLen) . $date . pack('N', $cnt);
-            }
-        }
-
-        return $binary;
+        $result = $this->process($inputPath, $start, $end);
+        file_put_contents($filepath, igbinary_serialize($result));
     }
 
-    private function unpackLinks(string $binary): array
-    {
-        if ($binary === '') {
-            return [];
-        }
-        $result = [];
-        $offset = 0;
-        $len = strlen($binary);
-        $numLinks = unpack('N', substr($binary, $offset, 4))[1] ?? 0;
-        $offset += 4;
-        for ($i = 0; $i < $numLinks && $offset < $len; $i++) {
-            $linkLen = unpack('n', substr($binary, $offset, 2))[1] ?? 0;
-            $offset += 2;
-            $link = substr($binary, $offset, $linkLen);
-            $offset += $linkLen;
-            $numDates = unpack('N', substr($binary, $offset, 4))[1] ?? 0;
-            $offset += 4;
-            $result[$link] = [];
-            for ($j = 0; $j < $numDates && $offset < $len; $j++) {
-                $dateLen = unpack('n', substr($binary, $offset, 2))[1] ?? 0;
-                $offset += 2;
-                $date = substr($binary, $offset, $dateLen);
-                $offset += $dateLen;
-                $cnt = unpack('N', substr($binary, $offset, 4))[1] ?? 0;
-                $offset += 4;
-                $result[$link][$date] = $cnt;
-            }
-        }
-
-        return $result;
-    }
-
-    private function worker(string $filepath, string $inputPath, int $pre, int $start, int $end): void
-    {
-        $result = $this->process($inputPath, $pre, $start, $end);
-        $data = $this->packLinks($result);
-        file_put_contents($filepath, $data);
-    }
-
-    private function process(string $inputPath, int $pre, int $start, int $end): array
+    private function process(string $inputPath, int $start, int $end): array
     {
         $empty = [];
         for ($y = 2021; $y <= 2026; $y++) {
@@ -78,32 +37,41 @@ final class Parser
         $result = [];
 
         $handle = fopen($inputPath, 'r');
-        fseek($handle, $pre);
-        $cur = $pre;
-        if ($pre != $start) {
-            $data = fread($handle, $start - $pre);
-            $cur = $start - ($start - $pre - strrpos($data, "\n")) + 1;
+
+        fseek($handle, $start);
+        $cur = $start;
+        if ($start != 0) {
+            $data = fread($handle, self::ADDITIONAL_READ_BYTES);
+            $cur += strpos($data, "\n") + 1;
         }
+        fixnewlineatend:
         while ($cur < $end) {
             fseek($handle, $cur);
-            $data = fread($handle, min(self::BUFFER_SIZE, $end - $cur));
-            foreach (explode("\n", $data) as $line) {
-                [$link, $date] = [...explode(',', $line), ''];
-                if (!$date || strlen($date) < 25) {
-                    $cur -= strlen($line);
+            $data = fread($handle, min(self::BUFFER_SIZE, $end - $cur + self::ADDITIONAL_READ_BYTES));
+            $o = 0;
+            $bufferHardEnd = strlen($data);
+            $bufferSoftEnd = min($bufferHardEnd, $end - $cur);
+            while ($o < $bufferSoftEnd) {
+                $nextComma = strpos($data, ',', $o);
+                if ($nextComma === false || $nextComma + self::DATE_LENGTH >= $bufferHardEnd) {
                     break;
                 }
-                $link = substr($link, 25);
+                $link = substr($data, $o + self::URL_FIXED_LENGTH, $nextComma - $o - self::URL_FIXED_LENGTH);
                 if (!isset($result[$link])) {
                     $result[$link] = $empty;
                 }
-                $date = substr($date, 0, 10);
+                $date = substr($data, $nextComma + 1, self::DATE_LENGTH);
                 $result[$link][$date] += 1;
+
+                $o = $nextComma + self::COMMA_TO_NEWLINE_OFFSET;
             }
-            if (strlen($data) < self::BUFFER_SIZE) {
-                break;
-            }
-            $cur += strlen($data);
+
+            $cur += $o;
+        }
+
+        if ($cur == $end + 1) {
+            $end += 2;
+            goto fixnewlineatend;
         }
 
         return $result;
@@ -221,7 +189,7 @@ final class Parser
         for ($i = 0; $i < self::WORKERS; $i++) {
             $pid = pcntl_fork();
             if ($pid == 0) {
-                $this->worker($tempFiles[$i], $inputPath, max(0, $start - 100), $start + 1, min($start + $chunk, $size));
+                $this->worker($tempFiles[$i], $inputPath, $start + 1, min($start + $chunk, $size));
                 exit(0);
             }
 
@@ -237,7 +205,7 @@ final class Parser
 
         foreach ($tempFiles as $i => $f) {
             $data = @file_get_contents($f);
-            $results[] = $data ? $this->unpackLinks($data) : [];
+            $results[] = $data ? igbinary_unserialize($data) : [];
             @unlink($f);
         }
 
