@@ -293,7 +293,7 @@ final class BenchmarkRunCommand
             return null;
         }
 
-        if ($meanTime < 30) {
+        if ($meanTime < 10) {
             // Second run for fast PRs
             $command = sprintf(
                 "hyperfine --warmup 2 --runs 5 --export-json %s 'cd %s && %s'",
@@ -409,6 +409,14 @@ final class BenchmarkRunCommand
                     'benchmarkTime' => $currentTime,
                 ];
             }
+        }
+
+        if (!isset($data[$branch])) {
+            $data[$branch] = [
+                'submissionTime' => time(),
+                'branch' => $branch,
+                'benchmarkTime' => $newTime,
+            ];
         }
 
         fclose($handle);
