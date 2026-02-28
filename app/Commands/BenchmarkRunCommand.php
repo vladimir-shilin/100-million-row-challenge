@@ -5,7 +5,9 @@ namespace App\Commands;
 use Tempest\Cache\Cache;
 use Tempest\Console\ConsoleCommand;
 use Tempest\Console\HasConsole;
+use Tempest\DateTime\DateTime;
 use Tempest\DateTime\Duration;
+use Tempest\DateTime\FormatPattern;
 use Tempest\HttpClient\HttpClient;
 use Throwable;
 use function Tempest\env;
@@ -258,10 +260,68 @@ final class BenchmarkRunCommand
         $this->prLine($prNumber, "Cloning…");
         exec("git clone --branch " . escapeshellarg($branch) . " " . escapeshellarg($cloneUrl) . " " . escapeshellarg($benchmarkDir) . " 2>&1", $output, $returnCode);
 
+
         if ($returnCode !== 0) {
             $this->prError($prNumber, "Failed to clone");
             $this->githubComment($prNumber, 'Benchmarking failed: Unable to clone repository');
             return null;
+        }
+
+        if ($this->verify) {
+            // Get latest commit date
+            $this->prLine($prNumber, 'Checking commit date…');
+            exec("cd " . escapeshellarg($benchmarkDir) . " && git log -1 --format=%ct 2>&1", $commitOutput, $commitReturnCode);
+
+            if ($commitReturnCode !== 0 || empty($commitOutput[0])) {
+                $this->prError($prNumber, "Failed to get commit date");
+                $this->githubComment($prNumber, 'Benchmarking failed: Unable to get commit date');
+                return null;
+            }
+
+            $commitTimestamp = (int) $commitOutput[0];
+
+            // Get the verified label creation date
+            $response = $this->http->get(
+                uri: "https://api.github.com/repos/tempestphp/100-million-row-challenge/issues/{$prNumber}/events",
+                headers: [
+                    'Authorization' => 'Bearer ' . $this->token,
+                    'User-Agent' => 'Tempest-Benchmark',
+                    'Accept' => 'application/vnd.github.v3+json'
+                ],
+            );
+
+            if (! $response->status->isSuccessful()) {
+                $this->prError($prNumber, "Failed to fetch PR events from GitHub");
+                $this->githubComment($prNumber, 'Benchmarking failed: Unable to verify label timeline');
+                return null;
+            }
+
+            $events = json_decode($response->body, true) ?? [];
+            $verifiedLabelTimestamp = null;
+
+            // Find the most recent 'verified' label addition event
+            foreach (array_reverse($events) as $event) {
+                if ($event['event'] === 'labeled' && $event['label']['name'] === 'verified') {
+                    // Sat Feb 28 2026 07:27:30 GMT+0000
+                    // 2026-02-28T07:28:28Z
+                    $verifiedLabelTimestamp = strtotime($event['created_at']);
+                    break;
+                }
+            }
+
+            if ($verifiedLabelTimestamp === null) {
+                $this->prError($prNumber, "Could not find verified label timestamp");
+                $this->githubComment($prNumber, 'Benchmarking failed: Unable to determine when verified label was added');
+                return null;
+            }
+
+            // Verify whether the commit date is before when the verified label was added
+            if ($commitTimestamp >= $verifiedLabelTimestamp) {
+                $this->prError($prNumber, "Latest commit is after verified label was added");
+                $this->githubComment($prNumber, 'Benchmarking stopped: New commits detected after verification. Please request re-verification.');
+                $this->githubRemoveLabel($prNumber, 'verified');
+                return null;
+            }
         }
 
         // Composer install
