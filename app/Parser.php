@@ -12,7 +12,7 @@ final class Parser
 
     private const int URL_FIXED_LENGTH = 25;
 
-    private const int DATE_LENGTH = 10;
+    private const int MIN_LINK_LENGTH = 4;
 
     private const int COMMA_TO_NEWLINE_OFFSET = 27;
 
@@ -20,7 +20,7 @@ final class Parser
 
     private function worker(\Socket $socket, string $inputPath, int $start, int $end): void
     {
-        $result = $this->process($inputPath, $start, $end);
+        $result = $this->process($inputPath, $start, $end - 1);
         $data = igbinary_serialize($result);
         socket_write($socket, $data, strlen($data));
         socket_close($socket);
@@ -34,24 +34,17 @@ final class Parser
         $handle = fopen($inputPath, 'r');
         stream_set_read_buffer($handle, 0);
 
-        fseek($handle, $start);
-        $cur = $start;
-        if ($start != 0) {
-            $data = fread($handle, self::ADDITIONAL_READ_BYTES);
-            $cur += strpos($data, "\n") + 1;
-        }
-        fixnewlineatend:
-        while ($cur < $end) {
-            fseek($handle, $cur);
-            $data = fread($handle, min(self::BUFFER_SIZE, $end - $cur + self::ADDITIONAL_READ_BYTES));
+        while ($start < $end) {
+            fseek($handle, $start);
+            $data = fread($handle, min(self::BUFFER_SIZE, $end - $start));
+            $endData = strrpos($data, "\n");
+            if ($endData === false) {
+                break;
+            }
+            $endData--;
             $o = 0;
-            $bufferHardEnd = strlen($data);
-            $bufferSoftEnd = min($bufferHardEnd, $end - $cur);
-            while ($o < $bufferSoftEnd) {
-                $nextComma = strpos($data, ',', $o);
-                if ($nextComma === false || $nextComma + self::DATE_LENGTH >= $bufferHardEnd) {
-                    break;
-                }
+            while ($o < $endData) {
+                $nextComma = strpos($data, ',', $o + self::MIN_LINK_LENGTH);
                 $link = substr($data, $o + self::URL_FIXED_LENGTH, $nextComma - $o - self::URL_FIXED_LENGTH);
                 if (!isset($result[$link])) {
                     $result[$link] = clone $empty;
@@ -64,13 +57,21 @@ final class Parser
                 $o = $nextComma + self::COMMA_TO_NEWLINE_OFFSET;
             }
 
-            $cur += $o;
+            $start += $endData + 2;
         }
 
-        if ($cur == $end + 1) {
-            $end += 2;
-            goto fixnewlineatend;
+        fseek($handle, $start);
+        $data = fread($handle, $end - $start);
+
+        $nextComma = strpos($data, ',', self::MIN_LINK_LENGTH);
+        $link = substr($data, self::URL_FIXED_LENGTH, $nextComma - self::URL_FIXED_LENGTH);
+        if (!isset($result[$link])) {
+            $result[$link] = clone $empty;
         }
+        $date = (ord($data[$nextComma + 4]) << 9)
+            + ((10 * ord($data[$nextComma + 6]) + ord($data[$nextComma + 7])) << 5)
+            + 10 * ord($data[$nextComma + 9]) + ord($data[$nextComma + 10]) - 42512;
+        $result[$link][$date] += 1;
 
         fclose($handle);
 
@@ -173,25 +174,38 @@ final class Parser
     {
         $size = filesize($inputPath);
         $chunk = intdiv($size, self::WORKERS) + 1;
-        $start = -1;
+        $start = 0;
 
         $sockets = [];
+
+        $handle = fopen($inputPath, 'r');
 
         for ($i = 0; $i < self::WORKERS; $i++) {
             $socketPair = [];
             socket_create_pair(AF_UNIX, SOCK_STREAM, 0, $socketPair);
 
+            $end = min($start + $chunk, $size);
+            if ($i != self::WORKERS - 1) {
+                fseek($handle, $end);
+                $data = fread($handle, self::ADDITIONAL_READ_BYTES);
+                $end += strpos($data, "\n") + 1;
+            } else {
+                $end = $size;
+            }
+
             $pid = pcntl_fork();
             if ($pid == 0) {
                 socket_close($socketPair[1]);
-                $this->worker($socketPair[0], $inputPath, $start + 1, min($start + $chunk, $size));
+                $this->worker($socketPair[0], $inputPath, $start, $end);
                 exit(0);
             }
             socket_close($socketPair[0]);
             $sockets[] = $socketPair[1];
 
-            $start += $chunk;
+            $start = $end;
         }
+
+        fclose($handle);
 
         $results = [];
 
