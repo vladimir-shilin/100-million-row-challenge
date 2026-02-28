@@ -34,8 +34,8 @@ final class Parser
 
     private function process(string $inputPath, int $start, int $end): array
     {
-        $empty = \SplFixedArray::fromArray(array_fill(0, self::DATA_POINTS, 0));
-        $result = array_map(fn() => clone $empty, $this->links);
+        $empty = array_fill(0, self::DATA_POINTS, 0);
+        $result = array_map(fn() => $empty, $this->links);
         $order = [];
 
         $handle = fopen($inputPath, 'r');
@@ -109,7 +109,7 @@ final class Parser
         $res = $res[0];
         $link = array_shift($links);
 
-        $dates = new \SplFixedArray(self::DATA_POINTS);
+        $dates = array_fill(0, self::DATA_POINTS, null);
         for ($j = 0; $j < self::DATA_POINTS; $j++) {
             $dates[$j] = sprintf('%d-%02d-%02d', 2021 + ($j >> 9), ($j >> 5) % 16, $j % 32);
         }
