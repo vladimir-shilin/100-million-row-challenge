@@ -2,8 +2,12 @@
 
 namespace App;
 
+use App\Commands\Visit;
+
 final class Parser
 {
+    private const int DATA_POINTS = 6 << 9;
+
     private const int BUFFER_SIZE = 16 * 1024;
 
     private const int OUTPUT_BUFFER = 256 * 1024;
@@ -12,11 +16,13 @@ final class Parser
 
     private const int URL_FIXED_LENGTH = 25;
 
-    private const int MIN_LINK_LENGTH = 4;
+    private const int SLUG_TO_COMMA_SEARCH_OFFSET = 5;
 
     private const int COMMA_TO_NEWLINE_OFFSET = 27;
 
     private const int WORKERS = 12;
+
+    private array $links = [];
 
     private function worker(\Socket $socket, string $inputPath, int $start, int $end): void
     {
@@ -28,8 +34,9 @@ final class Parser
 
     private function process(string $inputPath, int $start, int $end): array
     {
-        $empty = \SplFixedArray::fromArray(array_fill(0, 6 << 9, 0));
-        $result = [];
+        $empty = \SplFixedArray::fromArray(array_fill(0, self::DATA_POINTS, 0));
+        $result = array_map(fn() => clone $empty, $this->links);
+        $order = [];
 
         $handle = fopen($inputPath, 'r');
         stream_set_read_buffer($handle, 0);
@@ -44,15 +51,13 @@ final class Parser
             $endData--;
             $o = 0;
             while ($o < $endData) {
-                $nextComma = strpos($data, ',', $o + self::MIN_LINK_LENGTH);
+                $nextComma = strpos($data, ',', $o + self::SLUG_TO_COMMA_SEARCH_OFFSET);
                 $link = substr($data, $o + self::URL_FIXED_LENGTH, $nextComma - $o - self::URL_FIXED_LENGTH);
-                if (!isset($result[$link])) {
-                    $result[$link] = clone $empty;
-                }
                 $date = (ord($data[$nextComma + 4]) << 9)
                     + ((10 * ord($data[$nextComma + 6]) + ord($data[$nextComma + 7])) << 5)
                     + 10 * ord($data[$nextComma + 9]) + ord($data[$nextComma + 10]) - 42512;
                 $result[$link][$date] += 1;
+                $order[$link] = 0;
 
                 $o = $nextComma + self::COMMA_TO_NEWLINE_OFFSET;
             }
@@ -63,99 +68,103 @@ final class Parser
         fseek($handle, $start);
         $data = fread($handle, $end - $start);
 
-        $nextComma = strpos($data, ',', self::MIN_LINK_LENGTH);
+        $nextComma = strpos($data, ',', self::SLUG_TO_COMMA_SEARCH_OFFSET);
         $link = substr($data, self::URL_FIXED_LENGTH, $nextComma - self::URL_FIXED_LENGTH);
-        if (!isset($result[$link])) {
-            $result[$link] = clone $empty;
-        }
         $date = (ord($data[$nextComma + 4]) << 9)
             + ((10 * ord($data[$nextComma + 6]) + ord($data[$nextComma + 7])) << 5)
             + 10 * ord($data[$nextComma + 9]) + ord($data[$nextComma + 10]) - 42512;
         $result[$link][$date] += 1;
+        $order[$link] = 0;
 
         fclose($handle);
 
-        return $result;
+        return [$result, $order];
     }
 
     private function merge(array $results): array
     {
+        $order = [];
+        for ($i = 0; $i < count($results); $i++) {
+            foreach ($results[$i][1] as $link => $z) {
+                $order[$link] = $this->links[$link];
+            }
+        }
         for ($i = 1; $i < count($results); $i++) {
-            foreach ($results[$i] as $link => $dates) {
-                if (isset($results[0][$link])) {
-                    foreach ($dates as $date => $cnt) {
-                        $results[0][$link][$date] += $cnt;
-                    }
-                } else {
-                    $results[0][$link] = $dates;
+            foreach ($results[$i][0] as $link => $dates) {
+                $f = $results[0][0][$link];
+                foreach ($dates as $date => $cnt) {
+                    $f[$date] += $cnt;
                 }
             }
         }
 
-        return $results[0];
+        return [$results[0][0], $order];
     }
 
     private function writeResult(string $outputPath, array $res): void
     {
         $handle = fopen($outputPath, 'w');
         ob_start();
-        $links = array_keys($res);
-        $link = $links[0];
+        $links = array_keys($res[1]);
+        $res = $res[0];
+        $link = array_shift($links);
+
+        $dates = new \SplFixedArray(self::DATA_POINTS);
+        for ($j = 0; $j < self::DATA_POINTS; $j++) {
+            $dates[$j] = sprintf('%d-%02d-%02d', 2021 + ($j >> 9), ($j >> 5) % 16, $j % 32);
+        }
 
         echo "{\n";
-        echo '    "\/blog\/' . str_replace('/', '\/', $link) . '": {' . "\n";
+        echo '    "\/blog\/' . $link . '": {' . "\n";
         $j = 0;
-        $jl = 6 << 9;
+        $jl = self::DATA_POINTS;
+        $data = $res[$link];
         while ($j < $jl) {
-            $cnt = $res[$link][$j];
-            $date = sprintf('%d-%02d-%02d', 2021 + ($j >> 9), ($j >> 5) % 16, $j % 32);
+            $cnt = $data[$j];
             if ($cnt == 0) {
                 $j++;
 
                 continue;
             }
-            echo sprintf('        "%s": %d', $date, $cnt);
+            echo sprintf('        "%s": %d', $dates[$j], $cnt);
             $j++;
             break;
         }
         while ($j < $jl) {
-            $cnt = $res[$link][$j];
-            $date = sprintf('%d-%02d-%02d', 2021 + ($j >> 9), ($j >> 5) % 16, $j % 32);
+            $cnt = $data[$j];
             if ($cnt == 0) {
                 $j++;
 
                 continue;
             }
-            echo sprintf(",\n        \"%s\": %d", $date, $cnt);
+            echo sprintf(",\n        \"%s\": %d", $dates[$j], $cnt);
             $j++;
         }
         echo "\n    }";
 
-        for ($i = 1, $ll = count($links); $i < $ll; $i++) {
-            $link = $links[$i];
+        foreach ($links as $link) {
             echo ",\n" . '    "\/blog\/' . str_replace('/', '\/', $link) . '": {' . "\n";
             $j = 0;
+            $data = $res[$link];
             while ($j < $jl) {
-                $cnt = $res[$link][$j];
-                $date = sprintf('%d-%02d-%02d', 2021 + ($j >> 9), ($j >> 5) % 16, $j % 32);
+                $cnt = $data[$j];
                 if ($cnt == 0) {
                     $j++;
 
                     continue;
                 }
-                echo sprintf('        "%s": %d', $date, $cnt);
+                echo sprintf('        "%s": %d', $dates[$j], $cnt);
                 $j++;
                 break;
             }
             while ($j < $jl) {
-                $cnt = $res[$link][$j];
-                $date = sprintf('%d-%02d-%02d', 2021 + ($j >> 9), ($j >> 5) % 16, $j % 32);
+                $cnt = $data[$j];
                 if ($cnt == 0) {
                     $j++;
 
                     continue;
                 }
-                echo sprintf(",\n        \"%s\": %d", $date, $cnt);
+                echo sprintf(",\n        \"%s\": %d", $dates[$j], $cnt);
                 $j++;
             }
 
@@ -172,6 +181,10 @@ final class Parser
 
     public function parse(string $inputPath, string $outputPath): void
     {
+        foreach (Visit::all() as $i => $v) {
+            $this->links[substr($v->uri, self::URL_FIXED_LENGTH)] = $i;
+        }
+
         $size = filesize($inputPath);
         $chunk = intdiv($size, self::WORKERS) + 1;
         $start = 0;
