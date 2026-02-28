@@ -89,16 +89,16 @@ final class Parser
                 $order[$link] = $this->links[$link];
             }
         }
+        $res = $results[0][0];
         for ($i = 1; $i < count($results); $i++) {
             foreach ($results[$i][0] as $link => $dates) {
-                $f = $results[0][0][$link];
                 foreach ($dates as $date => $cnt) {
-                    $f[$date] += $cnt;
+                    $res[$link][$date] += $cnt;
                 }
             }
         }
 
-        return [$results[0][0], $order];
+        return [$res, $order];
     }
 
     private function writeResult(string $outputPath, array $res): void
