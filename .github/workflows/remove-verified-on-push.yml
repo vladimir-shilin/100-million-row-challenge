@@ -1,0 +1,28 @@
+name: Remove verified label on new commits
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  remove-verified-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove "verified" label
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            if (!labels.includes('verified')) {
+              core.info('Label "verified" not present, skipping.');
+              return;
+            }
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'verified'
+            });
